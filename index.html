@@ -23,7 +23,7 @@
         <!-- ヘッダー -->
         <header class="bg-white p-4 rounded-lg shadow-sm border-l-4 border-blue-600 flex justify-between items-center">
             <h1 class="text-xl font-bold text-gray-800">処方・日付計算ツール</h1>
-            <span class="text-xs text-gray-500 font-mono">Ver 1.0 (Offline)</span>
+            <span class="text-xs text-gray-500 font-mono">Ver 2.0 (Offline)</span>
         </header>
 
         <!-- 1. 飲み終わり計算 -->
@@ -47,11 +47,30 @@
                         </div>
                     </div>
                 </div>
+                <div>
+                    <label class="block text-sm font-bold text-gray-600 mb-1">1日の服用回数</label>
+                    <select id="calc1-doses" class="w-full bg-slate-50 border border-slate-300 rounded p-3 text-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        <option value="1">1回</option>
+                        <option value="2">2回</option>
+                        <option value="3" selected>3回</option>
+                        <option value="4">4回</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-bold text-gray-600 mb-1">飲み始めのタイミング</label>
+                    <select id="calc1-startslot" class="w-full bg-slate-50 border border-slate-300 rounded p-3 text-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        <!-- 服用回数に応じて動的生成 -->
+                    </select>
+                </div>
             </div>
             <div class="bg-blue-50 p-4 rounded border border-blue-200 text-center">
-                <div class="text-sm text-blue-600 mb-1">飲み終わり日 (当日含む)</div>
+                <div class="text-sm text-blue-600 mb-1">飲み終わり (最後の服用)</div>
                 <div id="calc1-result" class="text-3xl font-bold text-blue-800">-</div>
+                <div id="calc1-sub" class="text-xs text-blue-500 mt-2"></div>
             </div>
+            <p class="text-xs text-gray-400 mt-3 leading-relaxed">
+                ※服用時間は目安です（朝／昼／夕／眠前）。1日2回が「朝・昼」の場合など実際と異なるときは、表示の番号と回数で読み替えてください。
+            </p>
         </section>
 
         <!-- 2. 必要日数計算 -->
@@ -111,14 +130,19 @@
     </div>
 
     <script>
-        // 初期化: 今日の日付をセット
-        const today = new Date().toISOString().split('T')[0];
-        document.getElementById('calc1-start').value = today;
-        document.getElementById('calc2-start').value = today;
-        document.getElementById('calc3-start').value = today;
-
         // 曜日配列
         const weekDays = ['日', '月', '火', '水', '木', '金', '土'];
+
+        // 服用回数 -> タイミングラベル（目安）
+        function getDoseLabels(n) {
+            const map = {
+                1: ['朝'],
+                2: ['朝', '夕'],
+                3: ['朝', '昼', '夕'],
+                4: ['朝', '昼', '夕', '眠前']
+            };
+            return map[n] || ['朝'];
+        }
 
         // 日付フォーマット関数
         function formatDate(date) {
@@ -129,59 +153,108 @@
             return `${y}/${m}/${d} (${w})`;
         }
 
-        // 文字列からDateオブジェクト生成 (JST補正)
+        // 文字列からDateオブジェクト生成（ローカルタイム0時で固定。UTC解釈による日付ズレを防ぐ）
         function parseDate(str) {
             if (!str) return null;
-            return new Date(str);
+            const parts = str.split('-').map(Number);
+            if (parts.length !== 3 || parts.some(isNaN)) return null;
+            return new Date(parts[0], parts[1] - 1, parts[2]);
         }
 
-        // 計算1: 飲み終わり
+        // 「飲み始め」セレクトを服用回数に合わせて再生成
+        function rebuildStartSlot(keepIndex) {
+            const dosesEl = document.getElementById('calc1-doses');
+            const slotEl = document.getElementById('calc1-startslot');
+            const n = parseInt(dosesEl.value, 10);
+            const labels = getDoseLabels(n);
+            const prev = (typeof keepIndex === 'number') ? keepIndex : parseInt(slotEl.value, 10) || 0;
+            slotEl.innerHTML = labels
+                .map((l, i) => `<option value="${i}">${i + 1}回目（${l}）</option>`)
+                .join('');
+            // 以前の選択が範囲内なら維持、超えたら最後にクランプ
+            slotEl.value = Math.min(prev, labels.length - 1);
+        }
+
+        // 計算1: 飲み終わり（総服用回数ベース）
         function runCalc1() {
             const startStr = document.getElementById('calc1-start').value;
             const daysStr = document.getElementById('calc1-days').value;
-            
+            const dosesPerDay = parseInt(document.getElementById('calc1-doses').value, 10);
+            const startSlot = parseInt(document.getElementById('calc1-startslot').value, 10) || 0;
+            const resultEl = document.getElementById('calc1-result');
+            const subEl = document.getElementById('calc1-sub');
+
             if (!startStr || !daysStr) {
-                document.getElementById('calc1-result').textContent = "-";
+                resultEl.textContent = '-';
+                subEl.textContent = '';
                 return;
             }
 
-            const startDate = parseDate(startStr);
             const days = parseInt(daysStr, 10);
+            if (!days || days <= 0 || !dosesPerDay) {
+                resultEl.textContent = '-';
+                subEl.textContent = '';
+                return;
+            }
 
-            // ロジック: 開始日 + 日数 - 1日
-            startDate.setDate(startDate.getDate() + days - 1);
-            
-            document.getElementById('calc1-result').textContent = formatDate(startDate);
+            const labels = getDoseLabels(dosesPerDay);
+            const totalDoses = days * dosesPerDay;          // 総服用回数
+            const firstDayDoses = dosesPerDay - startSlot;  // 開始日に飲める残り回数
+
+            let daysToAdd, finalSlotIndex;
+            if (totalDoses <= firstDayDoses) {
+                // 開始日のうちに飲み終わる
+                daysToAdd = 0;
+                finalSlotIndex = startSlot + totalDoses - 1;
+            } else {
+                const remaining = totalDoses - firstDayDoses;       // 開始日消費後の残り
+                const fullDays = Math.floor(remaining / dosesPerDay); // フルに飲む日数
+                const remainder = remaining % dosesPerDay;          // 最終日の端数回数
+                if (remainder === 0) {
+                    daysToAdd = fullDays;
+                    finalSlotIndex = dosesPerDay - 1;               // その日の最後の服用
+                } else {
+                    daysToAdd = fullDays + 1;
+                    finalSlotIndex = remainder - 1;
+                }
+            }
+
+            const endDate = parseDate(startStr);
+            endDate.setDate(endDate.getDate() + daysToAdd);
+
+            resultEl.textContent = `${formatDate(endDate)} の ${labels[finalSlotIndex]}`;
+            subEl.textContent = `処方 ${days}日分（計 ${totalDoses} 回） / 飲み始め：${labels[startSlot]}`;
         }
 
         // 計算2: 必要日数
         function runCalc2() {
             const startStr = document.getElementById('calc2-start').value;
             const endStr = document.getElementById('calc2-end').value;
+            const resultEl = document.getElementById('calc2-result');
 
             if (!startStr || !endStr) {
-                document.getElementById('calc2-result').textContent = "-";
+                resultEl.textContent = '-';
                 return;
             }
 
             const startDate = parseDate(startStr);
             const endDate = parseDate(endStr);
 
-            // 差分計算 (ミリ秒 -> 日)
+            // 差分計算 (ミリ秒 -> 日)。両方ローカル0時なのでDST影響を避けるため四捨五入
             const diffTime = endDate - startDate;
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+            const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
 
             // ロジック: 差分 + 1日 (当日含むため)
             const totalDays = diffDays + 1;
 
             if (totalDays <= 0) {
-                 document.getElementById('calc2-result').textContent = "日付を確認してください";
-                 document.getElementById('calc2-result').classList.add("text-red-500");
-                 document.getElementById('calc2-result').classList.remove("text-emerald-800");
+                 resultEl.textContent = '日付を確認してください';
+                 resultEl.classList.add('text-red-500');
+                 resultEl.classList.remove('text-emerald-800');
             } else {
-                 document.getElementById('calc2-result').textContent = totalDays + " 日分";
-                 document.getElementById('calc2-result').classList.remove("text-red-500");
-                 document.getElementById('calc2-result').classList.add("text-emerald-800");
+                 resultEl.textContent = totalDays + ' 日分';
+                 resultEl.classList.remove('text-red-500');
+                 resultEl.classList.add('text-emerald-800');
             }
         }
 
@@ -191,7 +264,7 @@
             const weeksStr = document.getElementById('calc3-weeks').value;
 
             if (!startStr || !weeksStr) {
-                document.getElementById('calc3-result').textContent = "-";
+                document.getElementById('calc3-result').textContent = '-';
                 return;
             }
 
@@ -219,10 +292,22 @@
             runCalc3();
         }
 
+        // 初期化: 今日の日付をセット
+        const today = new Date();
+        const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        document.getElementById('calc1-start').value = todayStr;
+        document.getElementById('calc2-start').value = todayStr;
+        document.getElementById('calc3-start').value = todayStr;
+
+        // 飲み始めセレクト初期生成（朝=0）
+        rebuildStartSlot(0);
+
         // イベントリスナー設定
         document.getElementById('calc1-start').addEventListener('input', runCalc1);
         document.getElementById('calc1-days').addEventListener('input', runCalc1);
-        
+        document.getElementById('calc1-doses').addEventListener('change', () => { rebuildStartSlot(); runCalc1(); });
+        document.getElementById('calc1-startslot').addEventListener('change', runCalc1);
+
         document.getElementById('calc2-start').addEventListener('input', runCalc2);
         document.getElementById('calc2-end').addEventListener('input', runCalc2);
 
